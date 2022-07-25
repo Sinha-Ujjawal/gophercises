@@ -56,16 +56,18 @@ func (bfsConfig BFSConfig[N]) BFS(s N) ([]DepthNode[N], error) {
 	var newFrontier []DepthNode[N]
 	seen := map[N]bool{s: true}
 	frontier = append(frontier, DepthNode[N]{Node: s, Depth: 0})
-loop:
 	for {
 		if frontier == nil {
 			break
 		}
+		ret = append(ret, frontier...)
+		if len(ret) == int(bfsConfig.maxElements) {
+			break
+		}
 		newFrontier = nil
 		for _, u := range frontier {
-			ret = append(ret, u)
-			if len(ret) == int(bfsConfig.maxElements) {
-				break loop
+			if len(ret)+len(newFrontier) >= int(bfsConfig.maxElements) {
+				break
 			}
 			if u.Depth < bfsConfig.maxDepth {
 				neighbors, err := bfsConfig.neighborFn(u.Node)
@@ -86,5 +88,5 @@ loop:
 		}
 		frontier = newFrontier
 	}
-	return ret, nil
+	return ret[:bfsConfig.maxElements], nil
 }
