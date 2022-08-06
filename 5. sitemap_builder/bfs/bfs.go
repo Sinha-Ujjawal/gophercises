@@ -61,7 +61,7 @@ func (bfsConfig BFSConfig[N]) BFS(s N) ([]DepthNode[N], error) {
 			break
 		}
 		ret = append(ret, frontier...)
-		if len(ret) == int(bfsConfig.maxElements) {
+		if len(ret) >= int(bfsConfig.maxElements) {
 			break
 		}
 		newFrontier = nil
