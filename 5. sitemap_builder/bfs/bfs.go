@@ -1,92 +1,94 @@
 package bfs
 
-type BFSConfig[N comparable] struct {
-	neighborFn   func(N) (map[N]bool, error)
-	ignoreErrors bool
-	maxDepth     uint32
-	maxElements  uint64
-}
-
-type bfsConfigOpt[N comparable] func(*BFSConfig[N])
-
-func WithIgnoreErrors[N comparable](ignoreErrors bool) bfsConfigOpt[N] {
-	return func(bfsConfig *BFSConfig[N]) {
-		bfsConfig.ignoreErrors = ignoreErrors
-	}
-}
-
-func WithMaxDepth[N comparable](maxDepth uint32) bfsConfigOpt[N] {
-	return func(bfsConfig *BFSConfig[N]) {
-		bfsConfig.maxDepth = maxDepth
-	}
-}
-
-func WithMaxElements[N comparable](maxElements uint64) bfsConfigOpt[N] {
-	return func(bfsConfig *BFSConfig[N]) {
-		bfsConfig.maxElements = maxElements
-	}
-}
-
-func NewBFSConfig[N comparable](
-	neighborFn func(N) (map[N]bool, error),
-	opts ...bfsConfigOpt[N],
-) BFSConfig[N] {
-	ret := BFSConfig[N]{
-		neighborFn:   neighborFn,
-		ignoreErrors: false,
-		maxDepth:     uint32(1 << 31),
-		maxElements:  uint64(1 << 63),
-	}
-
-	for _, opt := range opts {
-		opt(&ret)
-	}
-	return ret
-}
+import "sync"
 
 type DepthNode[N comparable] struct {
 	Node   N
 	Depth  uint32
 	Parent N
+	Err    error
 }
 
-func (bfsConfig BFSConfig[N]) BFS(s N) ([]DepthNode[N], error) {
-	var ret []DepthNode[N]
-	var frontier []DepthNode[N]
-	var newFrontier []DepthNode[N]
-	seen := map[N]bool{s: true}
-	frontier = append(frontier, DepthNode[N]{Node: s, Depth: 0})
-	for {
-		if frontier == nil {
-			break
+type sharedState[N comparable] struct {
+	lock        *sync.RWMutex
+	processed   map[N]bool
+	seen        map[N]bool
+	neighborFn  func(N) ([]N, error)
+	depth       uint32
+	maxDepth    uint32
+	newFrontier []DepthNode[N]
+	retCh       chan DepthNode[N]
+}
+
+func exitWhenAlreadyProcessed[N comparable](u DepthNode[N], state *sharedState[N]) bool {
+	state.lock.RLock()
+	defer state.lock.RUnlock()
+	_, ok := state.processed[u.Node]
+	return ok
+}
+
+func bfsCallForNode[N comparable](u DepthNode[N], state *sharedState[N]) {
+	if exitWhenAlreadyProcessed(u, state) {
+		return
+	}
+
+	neighbors, err := state.neighborFn(u.Node)
+
+	state.lock.Lock()
+	defer state.lock.Unlock()
+	state.processed[u.Node] = true
+	if err != nil {
+		u.Err = err
+		state.retCh <- u
+		return
+	}
+	for _, vNode := range neighbors {
+		_, ok := state.seen[vNode]
+		if !ok {
+			state.seen[vNode] = true
+			v := DepthNode[N]{Node: vNode, Depth: state.depth + 1, Parent: u.Node}
+			state.retCh <- v
+			state.newFrontier = append(state.newFrontier, v)
 		}
-		ret = append(ret, frontier...)
-		if len(ret) >= int(bfsConfig.maxElements) {
-			break
+	}
+}
+
+func BFS[N comparable](s N, neighborFn func(N) ([]N, error), maxDepth uint32) <-chan DepthNode[N] {
+	retCh := make(chan DepthNode[N])
+	go func() {
+		var wg sync.WaitGroup
+		var lock sync.RWMutex
+		processed := map[N]bool{}
+		seen := map[N]bool{s: true}
+		frontier := []DepthNode[N]{{Node: s, Depth: 0}}
+		state := sharedState[N]{
+			lock:        &lock,
+			processed:   processed,
+			seen:        seen,
+			neighborFn:  neighborFn,
+			depth:       0,
+			maxDepth:    maxDepth,
+			newFrontier: nil,
+			retCh:       retCh,
 		}
-		newFrontier = nil
-		for _, u := range frontier {
-			if len(ret)+len(newFrontier) >= int(bfsConfig.maxElements) {
+		state.retCh <- frontier[0]
+		for depth := uint32(0); depth < maxDepth; depth++ {
+			if frontier == nil {
 				break
 			}
-			if u.Depth < bfsConfig.maxDepth {
-				neighbors, err := bfsConfig.neighborFn(u.Node)
-				if err != nil {
-					if !bfsConfig.ignoreErrors {
-						return nil, err
-					}
-				} else {
-					for vNode := range neighbors {
-						if !seen[vNode] {
-							seen[vNode] = true
-							v := DepthNode[N]{Node: vNode, Depth: u.Depth + 1, Parent: u.Node}
-							newFrontier = append(newFrontier, v)
-						}
-					}
-				}
+			state.depth = depth
+			for _, u := range frontier {
+				wg.Add(1)
+				go func(u DepthNode[N]) {
+					defer wg.Done()
+					bfsCallForNode(u, &state)
+				}(u)
 			}
+			wg.Wait()
+			frontier = state.newFrontier
+			state.newFrontier = nil
 		}
-		frontier = newFrontier
-	}
-	return ret[:bfsConfig.maxElements], nil
+		close(retCh)
+	}()
+	return retCh
 }
